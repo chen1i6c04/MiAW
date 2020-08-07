@@ -1,5 +1,4 @@
 import subprocess
-from subprocess import CalledProcessError
 
 
 class Option:
@@ -65,5 +64,5 @@ class AbstractCommandline:
         stdout_str, stderr_str = child_process.communicate()
         return_code = child_process.returncode
         if return_code:
-            raise CalledProcessError(return_code, str(self), stdout_str, stderr_str)
+            raise subprocess.CalledProcessError(return_code, str(self), stdout_str, stderr_str)
         return stdout_str, stderr_str

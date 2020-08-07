@@ -89,3 +89,22 @@ class AMRFinderCommandline(AbstractCommandline):
             Option(['--threads', 'threads']),
         ]
         AbstractCommandline.__init__(self, cmd, **kwargs)
+
+
+class ShovillCommandline(AbstractCommandline):
+    def __init__(self, cmd='shovill', **kwargs):
+        self.parameters = [
+            Option(['--R1', 'r1']),
+            Option(['--R2', 'r2']),
+            Option(['--outdir', 'outdir']),
+            Option(['--depth', 'depth']),
+            Option(['--gsize', 'gsize']),
+            Option(['--tmpdir', 'tmpdir']),
+            Option(['--cpus', 'cpus']),
+            Option(['--ram', 'ram']),
+            Switch(['--trim', 'trim']),
+            Switch(['--force', 'force']),
+            Switch(['--noreadcorr', 'noreadcorr']),
+            Switch(['--nostitch', 'nostitch']),
+        ]
+        AbstractCommandline.__init__(self, cmd, **kwargs)
