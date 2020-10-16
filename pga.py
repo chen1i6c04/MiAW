@@ -94,7 +94,7 @@ def main():
     with TemporaryDirectory(dir=args.outdir) as outdir:
         assembly(args.r1, args.r2, outdir, args.threads)
         shutil.copy(os.path.join(outdir, 'contigs.fasta'), args.outdir)
-    seqfile = os.path.join(args.outdir, 'contigs.fa')
+    seqfile = os.path.join(args.outdir, 'contigs.fasta')
 
     logger.info("Plasmid type prediction.")
     plasmid_identify(seqfile, args.outdir)
