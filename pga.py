@@ -1,4 +1,5 @@
 import os
+import re
 import yaml
 import shutil
 import argparse
@@ -29,6 +30,20 @@ def trimming(forward_reads, reverse_reads, outdir, threads, compress=False):
     return forward_paired, reverse_paired
 
 
+def estimate_genome_size(infile, threads):
+    with TemporaryDirectory(dir=TMPDIR) as tmp:
+        cmd = f'kmc -sm -t{threads} -k21 -ci10 {infile} {tmp}/kmc {tmp}'
+        stdout, stderr = run_cmd(cmd)
+    pattern = r'No. of unique counted k-mers\s+\W\s+(\d+)'
+    result = re.search(pattern, stdout.decode())
+    return int(result.group(1))
+
+
+def count_bases(infile):
+    stdout, stderr = run_cmd(f'seqtk fqchk {infile} | grep ALL')
+    return int(stdout.decode().split()[1])
+
+
 def species_identify(input_files, outdir):
     database = os.path.join(DB, 'kmerfinder_db', 'bacteria.ATG')
     taxonomy_file = os.path.join(DB, 'kmerfinder_db', 'bacteria.tax')
@@ -50,7 +65,7 @@ def assembly(forward_reads, reverse_reads, outdir, threads):
     forward_trim_reads, reverse_trim_reads = trimming(forward_reads, reverse_reads, outdir, threads)
     assembler = 'spades.py'
     run_cmd(f'{assembler} -1 {forward_trim_reads} -2 {reverse_trim_reads} -o {outdir} --tmp-dir {TMPDIR} -t {threads} '
-            f'--careful')
+            f'--careful --disable-gzip-output')
 
 
 def plasmid_identify(seqfile, outdir):
@@ -70,38 +85,55 @@ def resistance_gene_detection(seqfile, output_file, threads):
 
 def main():
     parser = argparse.ArgumentParser(usage='This program is for analyze MiSeq output.')
-    parser.add_argument("-r1", required=True, help="file with forward paired-end reads")
-    parser.add_argument("-r2", required=True, help="file with reverse paired-end reads")
+    parser.add_argument("-1", required=True, help="file with forward paired-end reads")
+    parser.add_argument("-2", required=True, help="file with reverse paired-end reads")
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
     parser.add_argument("--tmp-dir", default='/tmp', required=False,
                         help="directory for temporary files. [Default /tmp]")
-    args = parser.parse_args()
+    args = parser.parse_args().__dict__
+    forward_reads, reverse_reads = args['1'], args['2']
+    outdir = args['outdir']
+    threads = args['threads']
+    tmp_dir = args['tmp_dir']
 
     global TMPDIR
-    TMPDIR = args.tmp_dir
+    TMPDIR = tmp_dir
 
-    os.makedirs(args.outdir, exist_ok=True)
-    logger = create_logger(os.path.join(args.outdir, 'pga.log'))
+    os.makedirs(outdir, exist_ok=True)
+    logger = create_logger(os.path.join(outdir, 'pga.log'))
 
     logger.info("Quality control checks.")
-    run_cmd(f'fastqc -o {args.outdir} -t {args.threads} {args.r1} {args.r2}')
+    run_cmd(f'fastqc -o {outdir} -t 2 {forward_reads} {reverse_reads}')
 
     logger.info("Species identification.")
-    species_identify(f'{args.r1} {args.r2}', args.outdir)
+    species_identify(f'{forward_reads} {reverse_reads}', outdir)
 
-    logger.info("Assembling reads with SPAdes.")
-    with TemporaryDirectory(dir=args.outdir) as outdir:
-        assembly(args.r1, args.r2, outdir, args.threads)
-        shutil.copy(os.path.join(outdir, 'contigs.fasta'), args.outdir)
-    seqfile = os.path.join(args.outdir, 'contigs.fasta')
+    total_bases = count_bases(forward_reads) + count_bases(reverse_reads)
+    gsize = estimate_genome_size(forward_reads, threads)
+    depth = int(total_bases/gsize)
+
+    with TemporaryDirectory(dir=outdir) as spades_dir:
+        if depth > 100:
+            factor = '%.3f' % (100 / depth)
+            logger.info(f"Subsampling reads by factor {factor} to get from {depth}x to 100x")
+            r1 = os.path.join(spades_dir, 'R1.sub.fq.gz')
+            run_cmd(f"seqtk sample {forward_reads} {factor} | pigz --fast -c -p {threads} > {r1}")
+            r2 = os.path.join(spades_dir, 'R2.sub.fq.gz')
+            run_cmd(f"seqtk sample {reverse_reads} {factor} | pigz --fast -c -p {threads} > {r2}")
+        else:
+            r1, r2 = forward_reads, reverse_reads
+        logger.info("Assembling reads with SPAdes.")
+        assembly(r1, r2, spades_dir, threads)
+        shutil.copy(os.path.join(spades_dir, 'contigs.fasta'), outdir)
+    seqfile = os.path.join(outdir, 'contigs.fasta')
 
     logger.info("Plasmid type prediction.")
-    plasmid_identify(seqfile, args.outdir)
+    plasmid_identify(seqfile, outdir)
 
     logger.info("Identifies AMR genes.")
-    output_file = os.path.join(args.outdir, 'amrfinder.txt')
-    resistance_gene_detection(seqfile, output_file, args.threads)
+    output_file = os.path.join(outdir, 'amrfinder.txt')
+    resistance_gene_detection(seqfile, output_file, threads)
     logger.info("Done.")
 
 
