@@ -60,14 +60,6 @@ def crop_position(filepath, window_size=3, gap=10):
     for line in per_base_content:
         a, c, g, t = [float(value) for value in line]
         content_gaps.append(max(abs(a - t), abs(c - g)))
-    # for start in range(len(content_gaps)):
-    #     end = start + window_size
-    #     window = content_gaps[start: end]
-    #     if max(window) < gap:
-    #         head_crop = start
-    #         break
-    # else:
-    #     head_crop = 0
     for start in range(len(content_gaps), 0, -1):
         end = start - window_size
         window = content_gaps[end:start]
@@ -89,12 +81,12 @@ def trimming(short_1, short_2, outdir, threads):
     return r1, r2
 
 
-def species_identify(input_files, outdir):
+def species_identify(input_files, outfile):
     database = os.path.join(DB, 'kmerfinder_db', 'bacteria.ATG')
     taxonomy_file = os.path.join(DB, 'kmerfinder_db', 'bacteria.tax')
     with TemporaryDirectory(dir=TMPDIR) as tmpdir:
         run_cmd(f'kmerfinder.py -i {input_files} -o {tmpdir} -db {database} -tax {taxonomy_file} -x')
-        shutil.copy(os.path.join(tmpdir, 'results.txt'), os.path.join(outdir, 'kmerfinder.txt'))
+        shutil.copyfile(os.path.join(tmpdir, 'results.txt'), outfile)
 
 
 def spadesCommandline(prog='spades.py', **kwargs):
@@ -129,13 +121,13 @@ def spadesCommandline(prog='spades.py', **kwargs):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="Pathogen Analyze", description='This program is for analyze MiSeq output.')
+    parser = argparse.ArgumentParser(prog="MiWA", description='This program is for analyze MiSeq output.')
     parser.add_argument("-1", "--short_1", required=True, help="file with forward paired-end reads")
     parser.add_argument("-2", "--short_2", required=True, help="file with reverse paired-end reads")
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
-    parser.add_argument("--qc", action="store_true", help="Quality check with FastQC")
-    parser.add_argument("--id", action="store_true", help="Predicted species with Kmerfinder")
+    parser.add_argument("--qc", action="store_true", help="Quality check with FastQC [Default OFF]")
+    parser.add_argument("--id", action="store_true", help="Predicted species with Kmerfinder [Default OFF]")
     parser.add_argument("--tmp-dir", default='/tmp', required=False,
                         help="directory for temporary files. [Default /tmp]")
     args = parser.parse_args()
@@ -152,22 +144,25 @@ def main():
     logger_factory.addConsoleHandler()
     logger = logger_factory.create()
 
+    spades_dirname = os.path.join(outdir, 'spades')
+    pilon_dirname = os.path.join(spades_dirname, 'pilon')
+    kmerfinder_filename = os.path.join(outdir, 'kmerfinder.txt')
+    spades_filename = os.path.join(spades_dirname, 'contigs.fasta')
+    pilon_filename = os.path.join(pilon_dirname, 'pilon.fasta')
+    os.makedirs(spades_dirname, exist_ok=True)
+
     if args.qc:
         logger.info("Quality control checks")
         run_cmd(f'fastqc -o {outdir} -t 2 {args.short_1} {args.short_2}')
 
     if args.id:
         logger.info("Identify species")
-        species_identify(f'{args.short_1} {args.short_2}', outdir)
-
-    spades_dir = os.path.join(outdir, 'spades_assembly')
-    os.makedirs(spades_dir)
+        species_identify(f'{args.short_1} {args.short_2}', kmerfinder_filename)
 
     logger.info("Trim raw-reads.")
-
-    trim_short_1, trim_short_2 = trimming(args.short_1, args.short_2, spades_dir, threads)
-    total_bases = count_bases(trim_short_1) + count_bases(trim_short_2)
-    gsize = estimate_genome_size(trim_short_1, threads, TMPDIR)
+    r1, r2 = trimming(args.short_1, args.short_2, spades_dirname, threads)
+    total_bases = count_bases(r1) + count_bases(r2)
+    gsize = estimate_genome_size(r1, threads, TMPDIR)
     logger.info(f"Estimated genome size was {gsize}bp.")
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
@@ -176,29 +171,25 @@ def main():
     if origin_depth > depth:
         fraction = depth / origin_depth
         logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {depth}x")
-        sub_short_1 = os.path.join(spades_dir, 'sub_R1.fastq')
-        run_cmd(f"seqtk sample {trim_short_1} {fraction} > {sub_short_1}")
-        sub_short_2 = os.path.join(spades_dir, 'sub_R2.fastq')
-        run_cmd(f"seqtk sample {trim_short_2} {fraction} > {sub_short_2}")
-        _short_1, _short_2 = sub_short_1, sub_short_2
+        sub_r1 = os.path.join(spades_dirname, 'R1.sub.fastq')
+        run_cmd(f"seqtk sample {r1} {fraction} > {sub_r1}")
+        sub_r2 = os.path.join(spades_dirname, 'R2.sub.fastq')
+        run_cmd(f"seqtk sample {r2} {fraction} > {sub_r2}")
+        _r1, _r2 = sub_r1, sub_r2
     else:
-        _short_1, _short_2 = trim_short_1, trim_short_2
+        _r1, _r2 = r1, r2
 
     logger.info("SPAdes assemblies")
-    spades_cmd = spadesCommandline(short_1=_short_1, short_2=_short_2, outdir=spades_dir, tmpdir=TMPDIR,
+    spades_cmd = spadesCommandline(short_1=_r1, short_2=_r2, outdir=spades_dirname, tmpdir=TMPDIR,
                                    threads=threads, disable_gzip_output=True, cov_cutoff='auto', only_assembler=True)
     run_cmd(spades_cmd)
-    spades_output = os.path.join(spades_dir, 'contigs.fasta')
 
     logger.info("Polishing assembly with Pilon.")
-    pilon_dir = os.path.join(spades_dir, 'pilon_polish')
-    change_count = pilon_polish(_short_1, _short_2, spades_output, pilon_dir, threads)
+    change_count = pilon_polish(_r1, _r2, spades_filename, pilon_dirname, threads)
     logger.info(f"Total number of changes: {change_count}")
-    pilon_output = os.path.join(pilon_dir, 'pilon.fasta')
-    finall_assembly = os.path.join(outdir, 'assembly.fasta')
-    shutil.copyfile(pilon_output, finall_assembly)
-    shutil.copy(os.path.join(spades_dir, 'spades.log'), outdir)
-    shutil.rmtree(spades_dir)
+    asm_filename = os.path.join(outdir, 'assembly.fasta')
+    shutil.copyfile(pilon_filename, asm_filename)
+    shutil.rmtree(spades_dirname)
     logger.info("Done")
 
 
