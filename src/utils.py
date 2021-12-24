@@ -2,19 +2,36 @@ import subprocess
 from tempfile import TemporaryDirectory
 
 
-def run_cmd(cmd):
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, check=True)
-    return p
+def estimate_genome_size(filename, threads):
+    with TemporaryDirectory() as tmpdir:
+        kmc_process = subprocess.Popen(
+            ['kmc', '-sm', f'-t{threads}', '-k21', '-ci10', filename, f'{tmpdir}/kmc', tmpdir],
+            stdout=subprocess.PIPE,
+        )
+        grep_process = subprocess.Popen(
+            ['grep', 'No. of unique counted k-mers'],
+            stdin=kmc_process.stdout,
+            stdout=subprocess.PIPE
+        )
+        output = subprocess.check_output(
+            ['awk', '{print $NF}'],
+            stdin=grep_process.stdout
+        )
+    return int(output.decode().strip().split()[-1])
 
 
-def estimate_genome_size(filepath, threads, tmpdir='/tmp'):
-    with TemporaryDirectory(dir=tmpdir) as tmp:
-        cmd = f"kmc -sm -t{threads} -k21 -ci10 {filepath} {tmp}/kmc {tmp} | grep 'No. of unique counted k-mers' | " \
-              f"awk '{{print $NF}}'"
-        p = run_cmd(cmd)
-    return int(p.stdout.decode().strip())
-
-
-def count_bases(filepath):
-    p = run_cmd(f"seqtk fqchk {filepath} | grep ALL | awk '{{print $2}}'")
-    return int(p.stdout.decode().strip())
+def count_bases(filename):
+    seqtk_process = subprocess.Popen(
+        ['seqtk', 'fqchk', filename],
+        stdout=subprocess.PIPE
+    )
+    grep_process = subprocess.Popen(
+        ['grep', 'ALL'],
+        stdin=seqtk_process.stdout,
+        stdout=subprocess.PIPE
+    )
+    output = subprocess.check_output(
+        ['awk', '{print $2}'],
+        stdin=grep_process.stdout
+    )
+    return int(output.decode().strip())
