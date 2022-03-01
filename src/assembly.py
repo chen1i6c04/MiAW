@@ -20,25 +20,11 @@ def run_spades(paired_1, paired_2, outdir, threads):
 
 def reads_alignment(paired_1, paired_2, assembly, outfile, threads):
     subprocess.run(['bwa-mem2', 'index', assembly])
-    bwa_process = subprocess.Popen(
-        [
-            'bwa-mem2', 'mem',
-            '-v', '3',
-            '-x', 'intractg',
-            '-t', str(threads),
-            assembly, paired_1, paired_2,
-        ], stdout=subprocess.PIPE
-    )
     subprocess.run(
-        [
-            'samtools', 'sort',
-            '--threads', str(threads),
-            '-m', '500m',
-            '--reference', assembly,
-            '-T', '/tmp',
-            '-o', outfile,
-        ],
-        stdin=bwa_process.stdout)
+        f'bwa-mem2 mem -v 3 -x intractg -t {threads} {assembly} {paired_1} {paired_2} | '
+        f'samtools sort --threads {threads} -m 500m --reference {assembly} -T /tmp -o {outfile}',
+        shell=True,
+    )
     subprocess.run(['samtools', 'index', outfile])
 
 

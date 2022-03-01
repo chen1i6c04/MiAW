@@ -4,6 +4,8 @@ import logging
 import argparse
 import subprocess
 from tempfile import TemporaryDirectory
+from Bio import SeqIO
+from Bio.SeqUtils.lcc import lcc_simp
 from src.assembly import assembly_pipeline
 from src.utils import estimate_genome_size, count_bases
 
@@ -46,6 +48,8 @@ class LoggerFactory:
 def trimming(read_1, read_2, outdir, threads):
     paired_1 = os.path.join(outdir, 'R1.fastq.gz')
     paired_2 = os.path.join(outdir, 'R2.fastq.gz')
+    json_report = os.path.join(outdir, 'fastp.json')
+    html_report = os.path.join(outdir, 'fastp.html')
     cmd = [
         'fastp',
         '-i', read_1,
@@ -53,10 +57,11 @@ def trimming(read_1, read_2, outdir, threads):
         '-o', paired_1,
         '-O', paired_2,
         '--length_required', '36',
-        '--cut_front', '3', '--thread', str(threads),
+        '--cut_front', '3',
+        '--thread', str(threads),
         '--detect_adapter_for_pe',
-        '-j', '/dev/null',
-        '-h', '/dev/null',
+        '-j', json_report,
+        '-h', html_report,
         '-t', '1',
     ]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -64,14 +69,20 @@ def trimming(read_1, read_2, outdir, threads):
 
 
 def species_identify(input_files, database, outfile):
-    index_file = os.path.join(database, 'bacteria.ATG')
-    taxonomy_file = os.path.join(database, 'bacteria.tax')
+    idx_file = database + '.ATG'
+    tax_file = database + '.tax'
     with TemporaryDirectory() as tmpdir:
         subprocess.run(
-            ['kmerfinder.py', '-i', input_files, '-o', tmpdir, '-db', index_file, '-tax', taxonomy_file, '-x']
+            ['kmerfinder.py', '-i', input_files, '-o', tmpdir, '-db', idx_file, '-tax', tax_file, '-x']
         )
         shutil.copyfile(os.path.join(tmpdir, 'results.txt'), outfile)
 
+
+def remove_low_complexity_sequence(source, destination):
+    with open(destination, 'w') as out_f:
+        for record in SeqIO.parse(source, 'fasta'):
+            if lcc_simp(record.seq) > 0:
+                SeqIO.write(record, out_f, 'fasta')
 
 
 def main():
@@ -80,7 +91,7 @@ def main():
     parser.add_argument("-2", "--short_2", required=True, help="file with reverse paired-end reads")
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
-    parser.add_argument("--db", default='', required=False, help="Path of kmerfinder database")
+    parser.add_argument("--tax_db", default='', required=False, help="Path of kmerfinder database")
     parser.add_argument("--qc", action="store_true", help="Quality check with FastQC [Default OFF]")
 
     args = parser.parse_args()
@@ -102,12 +113,12 @@ def main():
         logger.info("Quality control checks")
         subprocess.run(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
 
-    if args.db:
+    if args.tax_db:
         logger.info("Identify species")
-        species_identify(f'{args.short_1} {args.short_2}', args.db, kmerfinder_filename)
+        species_identify(f'{args.short_1} {args.short_2}', args.tax_db, kmerfinder_filename)
 
     logger.info("Trim raw-reads.")
-    r1, r2 = trimming(args.short_1, args.short_2, assembly_dirname, threads)
+    r1, r2 = trimming(args.short_1, args.short_2, args.outdir, threads)
     total_bases = count_bases(r1) + count_bases(r2)
     gsize = estimate_genome_size(r1, threads)
     logger.info(f"Estimated genome size was {gsize}bp.")
@@ -130,12 +141,13 @@ def main():
 
     logger.info("Assembly with SPAdes")
     result_dirname = assembly_pipeline(_r1, _r2, assembly_dirname, threads)
-    shutil.copyfile(
+    remove_low_complexity_sequence(
         os.path.join(result_dirname, 'pilon.fasta'),
         os.path.join(outdir, 'assembly.fasta'),
     )
-
     shutil.rmtree(assembly_dirname)
+    # os.remove(r1)
+    # os.remove(r2)
     logger.info("Done")
 
 
