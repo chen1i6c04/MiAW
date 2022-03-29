@@ -7,7 +7,6 @@ from tempfile import TemporaryDirectory
 from Bio import SeqIO
 from Bio.SeqUtils.lcc import lcc_simp
 from src.assembly import assembly_pipeline
-from src.utils import estimate_genome_size, count_bases
 
 
 class LoggerFactory:
@@ -45,6 +44,23 @@ class LoggerFactory:
         return self._logger
 
 
+def estimate_genome_size(filename, threads):
+    with TemporaryDirectory() as tmpdir:
+        output = subprocess.getoutput(
+            f"kmc -sm -t{threads} -k21 -ci10 {filename} {tmpdir}/kmc {tmpdir} | "
+            f"grep 'No. of unique counted k-mers' | "
+            f"awk '{{print $NF}}'",
+        )
+    return int(output.strip().split()[-1])
+
+
+def count_bases(filename):
+    output = subprocess.getoutput(
+        f"seqtk fqchk {filename} | grep ALL | awk '{{print $2}}'",
+    )
+    return int(output.strip())
+
+
 def trimming(read_1, read_2, outdir, threads):
     paired_1 = os.path.join(outdir, 'R1.fastq.gz')
     paired_2 = os.path.join(outdir, 'R2.fastq.gz')
@@ -64,7 +80,7 @@ def trimming(read_1, read_2, outdir, threads):
         '-h', html_report,
         '-t', '1',
     ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(cmd)
     return paired_1, paired_2
 
 
@@ -85,14 +101,27 @@ def remove_low_complexity_sequence(source, destination):
                 SeqIO.write(record, out_f, 'fasta')
 
 
+def taxonomic_classification(r1, r2, database, kraken2_report, bracken_report, threads):
+    kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} " \
+                  f"--report {kraken2_report} --memory-mapping --paired {r1} {r2}"
+    bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -r 300 -o {bracken_report}"
+    cmd = kraken2_cmd + " && " + bracken_cmd
+    subprocess.run(cmd, shell=True)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="MiAW", description='Central lab MiSeq Analysis Workflow')
     parser.add_argument("-1", "--short_1", required=True, help="file with forward paired-end reads")
     parser.add_argument("-2", "--short_2", required=True, help="file with reverse paired-end reads")
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
-    parser.add_argument("--tax_db", default='', required=False, help="Path of kmerfinder database")
-    parser.add_argument("--qc", action="store_true", help="Quality check with FastQC [Default OFF]")
+    parser.add_argument("--tax_db", default='', required=False, help="Path of kraken2/bracken database")
+    parser.add_argument(
+        "--no-quality-check", action="store_true", help="Disable quality check [default: OFF]"
+    )
+    parser.add_argument(
+        "--no-assembly", action="store_true", help="Disable denovo assembly [default: OFF]"
+    )
 
     args = parser.parse_args()
     outdir = args.outdir
@@ -106,16 +135,20 @@ def main():
     logger = logger_factory.create()
 
     assembly_dirname = os.path.join(outdir, 'spades')
-    kmerfinder_filename = os.path.join(outdir, 'kmerfinder.txt')
+    # kmerfinder_filename = os.path.join(outdir, 'kmerfinder.txt')
+    kraken2_filename = os.path.join(outdir, 'kraken2.txt')
+    bracken_filename = os.path.join(outdir, 'bracken.txt')
     os.makedirs(assembly_dirname, exist_ok=True)
 
-    if args.qc:
+    if args.no_quality_check is False:
         logger.info("Quality control checks")
         subprocess.run(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
 
     if args.tax_db:
-        logger.info("Identify species")
-        species_identify(f'{args.short_1} {args.short_2}', args.tax_db, kmerfinder_filename)
+        # logger.info("Identify species")
+        # species_identify(f'{args.short_1} {args.short_2}', args.tax_db, kmerfinder_filename)
+        logger.info("Classify")
+        taxonomic_classification(args.short_1, args.short_2, args.tax_db, kraken2_filename, bracken_filename, threads)
 
     logger.info("Trim raw-reads.")
     r1, r2 = trimming(args.short_1, args.short_2, args.outdir, threads)
@@ -125,29 +158,27 @@ def main():
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
 
-    depth = 100
-    if origin_depth > depth:
-        fraction = depth / origin_depth
-        logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {depth}x")
-        sub_r1 = os.path.join(assembly_dirname, 'R1.sub.fastq')
-        with open(sub_r1, 'w+b') as handle:
-            subprocess.run(['seqtk', 'sample', r1, str(fraction)], stdout=handle)
-        sub_r2 = os.path.join(assembly_dirname, 'R2.sub.fastq')
-        with open(sub_r2, 'w+b') as handle:
-            subprocess.run(['seqtk', 'sample', r2, str(fraction)], stdout=handle)
-        _r1, _r2 = sub_r1, sub_r2
-    else:
-        _r1, _r2 = r1, r2
-
-    logger.info("Assembly with SPAdes")
-    result_dirname = assembly_pipeline(_r1, _r2, assembly_dirname, threads)
-    remove_low_complexity_sequence(
-        os.path.join(result_dirname, 'pilon.fasta'),
-        os.path.join(outdir, 'assembly.fasta'),
-    )
-    shutil.rmtree(assembly_dirname)
-    # os.remove(r1)
-    # os.remove(r2)
+    if args.no_assembly is False:
+        depth = 100
+        if origin_depth > depth:
+            fraction = depth / origin_depth
+            logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {depth}x")
+            sub_r1 = os.path.join(assembly_dirname, 'R1.sub.fastq')
+            subprocess.run(f"seqtk sample {r1} {fraction} > {sub_r1}", shell=True)
+            sub_r2 = os.path.join(assembly_dirname, 'R2.sub.fastq')
+            subprocess.run(f"seqtk sample {r2} {fraction} > {sub_r2}", shell=True)
+            _r1, _r2 = sub_r1, sub_r2
+        else:
+            _r1, _r2 = r1, r2
+        logger.info("Assembly with SPAdes")
+        result_dirname = assembly_pipeline(_r1, _r2, assembly_dirname, threads)
+        remove_low_complexity_sequence(
+            os.path.join(result_dirname, 'pilon.fasta'),
+            os.path.join(outdir, 'assembly.fasta'),
+        )
+        shutil.rmtree(assembly_dirname)
+    os.remove(r1)
+    os.remove(r2)
     logger.info("Done")
 
 
