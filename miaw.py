@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import logging
 import argparse
@@ -9,9 +10,10 @@ from Bio.SeqUtils.lcc import lcc_simp
 from src.assembly import assembly_pipeline
 
 
+
 class LoggerFactory:
 
-    FMT = "(PID:%(process)d)%(asctime)-20s[%(levelname)s] %(message)s"
+    FMT = "%(asctime)-20s[%(levelname)s] %(message)s"
     DATEFMT = "%Y-%m-%d %H:%M:%S"
 
     def __init__(self):
@@ -36,9 +38,6 @@ class LoggerFactory:
         formatter = logging.Formatter(self.FMT, self.DATEFMT)
         stream_handler.setFormatter(formatter)
         self._logger.addHandler(stream_handler)
-
-    def redircet_stdout(self):
-        pass
 
     def create(self):
         return self._logger
@@ -109,6 +108,28 @@ def taxonomic_classification(r1, r2, database, kraken2_report, bracken_report, t
     subprocess.run(cmd, shell=True)
 
 
+def check_dependency():
+    version = {
+        "FastQC" : "fastqc -v",
+        "fastp"  : "fastp -v 2>&1",
+        "Kraken2": "kraken2 -v | grep version",
+        "Bracken": "grep VERSION $(which bracken)",
+        "SPAdes" : "spades.py -v",
+        "KMC"    : "kmc | grep K-Mer",
+        "seqtk"  : "seqtk 2>&1 | grep Version",
+        "Pilon"  : "pilon | grep version",
+    }
+    logger = logging.getLogger(__name__)
+    for program_name, cmd in version.items():
+        child_process = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
+        if child_process.returncode:
+            logger.error(msg=f"Could not determine version of {program_name}")
+            sys.exit("Abort")
+        else:
+            version = child_process.stdout.decode().strip()
+            logger.info(msg=f"Using {program_name:8} | {version}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="MiAW", description='Central lab MiSeq Analysis Workflow')
     parser.add_argument("-1", "--short_1", required=True, help="file with forward paired-end reads")
@@ -133,12 +154,17 @@ def main():
     logger_factory.addFileHandler(logfile)
     logger_factory.addConsoleHandler()
     logger = logger_factory.create()
+    
+    check_dependency()
+    
+    logger.info(f"""Illumina sequences
+        {args.short_1}
+        {args.short_2}""")
 
     assembly_dirname = os.path.join(outdir, 'spades')
     # kmerfinder_filename = os.path.join(outdir, 'kmerfinder.txt')
     kraken2_filename = os.path.join(outdir, 'kraken2.txt')
     bracken_filename = os.path.join(outdir, 'bracken.txt')
-    os.makedirs(assembly_dirname, exist_ok=True)
 
     if args.no_quality_check is False:
         logger.info("Quality control checks")
@@ -151,27 +177,28 @@ def main():
         taxonomic_classification(args.short_1, args.short_2, args.tax_db, kraken2_filename, bracken_filename, threads)
 
     logger.info("Trim raw-reads.")
-    r1, r2 = trimming(args.short_1, args.short_2, args.outdir, threads)
-    total_bases = count_bases(r1) + count_bases(r2)
-    gsize = estimate_genome_size(r1, threads)
+    trim_r1, trim_r2 = trimming(args.short_1, args.short_2, args.outdir, threads)
+    total_bases = count_bases(trim_r1) + count_bases(trim_r2)
+    gsize = estimate_genome_size(trim_r1, threads)
     logger.info(f"Estimated genome size was {gsize}bp.")
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
 
     if args.no_assembly is False:
+        os.makedirs(assembly_dirname, exist_ok=True)
         depth = 100
         if origin_depth > depth:
             fraction = depth / origin_depth
             logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {depth}x")
             sub_r1 = os.path.join(assembly_dirname, 'R1.sub.fastq')
-            subprocess.run(f"seqtk sample {r1} {fraction} > {sub_r1}", shell=True)
+            subprocess.run(f"seqtk sample {trim_r1} {fraction} > {sub_r1}", shell=True)
             sub_r2 = os.path.join(assembly_dirname, 'R2.sub.fastq')
-            subprocess.run(f"seqtk sample {r2} {fraction} > {sub_r2}", shell=True)
-            _r1, _r2 = sub_r1, sub_r2
+            subprocess.run(f"seqtk sample {trim_r2} {fraction} > {sub_r2}", shell=True)
+            paired_1, paired_2 = sub_r1, sub_r2
         else:
-            _r1, _r2 = r1, r2
+            paired_1, paired_2 = trim_r1, trim_r2
         logger.info("Assembly with SPAdes")
-        result_dirname = assembly_pipeline(_r1, _r2, assembly_dirname, threads)
+        result_dirname = assembly_pipeline(paired_1, paired_2, assembly_dirname, threads)
         remove_low_complexity_sequence(
             os.path.join(result_dirname, 'pilon.fasta'),
             os.path.join(outdir, 'assembly.fasta'),
