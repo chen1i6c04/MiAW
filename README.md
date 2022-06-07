@@ -3,8 +3,11 @@ MiSeq Analysis Workflow of CDC central lab
 
 ## Dependence
 * fastqc
-* kmerfinder
+* kraken2
+* bracken
 * fastp
-* unicycler
+* spades
 * seqtk
 * kmc
+* busco
+* masurca

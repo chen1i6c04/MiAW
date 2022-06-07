@@ -1,4 +1,8 @@
+__author__ = 'B.H Chen'
+__email__ = 'chen1i6c04@gmail.com'
+
 import os
+import re
 import sys
 import shutil
 import logging
@@ -60,17 +64,17 @@ def count_bases(filename):
     return int(output.strip())
 
 
-def trimming(read_1, read_2, outdir, threads):
-    paired_1 = os.path.join(outdir, 'R1.fastq.gz')
-    paired_2 = os.path.join(outdir, 'R2.fastq.gz')
+def run_fastp(input_1, input_2, outdir, threads):
+    output_1 = os.path.join(outdir, 'R1.fastq.gz')
+    output_2 = os.path.join(outdir, 'R2.fastq.gz')
     json_report = os.path.join(outdir, 'fastp.json')
     html_report = os.path.join(outdir, 'fastp.html')
     cmd = [
         'fastp',
-        '-i', read_1,
-        '-I', read_2,
-        '-o', paired_1,
-        '-O', paired_2,
+        '-i', input_1,
+        '-I', input_2,
+        '-o', output_1,
+        '-O', output_2,
         '--length_required', '36',
         '--cut_front', '3',
         '--thread', str(threads),
@@ -80,7 +84,7 @@ def trimming(read_1, read_2, outdir, threads):
         '-t', '1',
     ]
     subprocess.run(cmd)
-    return paired_1, paired_2
+    return output_1, output_2
 
 
 def species_identify(input_files, database, outfile):
@@ -93,19 +97,45 @@ def species_identify(input_files, database, outfile):
         shutil.copyfile(os.path.join(tmpdir, 'results.txt'), outfile)
 
 
-def remove_low_complexity_sequence(source, destination):
+def remove_low_complexity_and_shorter_sequence(source, destination):
+    logger = logging.getLogger(__name__)
     with open(destination, 'w') as out_f:
         for record in SeqIO.parse(source, 'fasta'):
-            if lcc_simp(record.seq) > 0:
+            if lcc_simp(record.seq) > 0 and len(record.seq) >= 200:
                 SeqIO.write(record, out_f, 'fasta')
+            else:
+                logger.info(f"Removing contig {record.id}")
 
 
-def taxonomic_classification(r1, r2, database, kraken2_report, bracken_report, threads):
-    kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} " \
+def run_kraken2_and_bracken(r1, r2, database, kraken2_report, bracken_report, threads):
+    kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} --minimum-hit-groups 10 " \
                   f"--report {kraken2_report} --memory-mapping --paired {r1} {r2}"
     bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -r 300 -o {bracken_report}"
     cmd = kraken2_cmd + " && " + bracken_cmd
     subprocess.run(cmd, shell=True)
+
+
+def run_busco(input_file, output_dir, database, num_threads=1):
+    specific_pattern = re.compile("^short_summary.specific.*.busco.json$")
+    generic_pattern = re.compile("^short_summary.generic.*.busco.json$")
+    with TemporaryDirectory() as tmpdir:
+        cmd = f"busco -o busco --out_path {tmpdir} -m geno --offline --download_path {database} " \
+              f"-i {input_file} -c {num_threads} --auto-lineage-prok"
+        subprocess.run(cmd, shell=True, check=True)
+        out_path = os.path.join(tmpdir, "busco")
+        for f in os.listdir(out_path):
+            match = specific_pattern.fullmatch(f)
+            if match:
+                shutil.copyfile(
+                    os.path.join(out_path, f),
+                    os.path.join(output_dir, 'busco_specific_summary.json')
+                )
+            match = generic_pattern.fullmatch(f)
+            if match:
+                shutil.copyfile(
+                    os.path.join(out_path, f),
+                    os.path.join(output_dir, 'busco_generic_summary.json')
+                )
 
 
 def check_dependency():
@@ -117,7 +147,8 @@ def check_dependency():
         "SPAdes" : "spades.py -v",
         "KMC"    : "kmc | grep K-Mer",
         "seqtk"  : "seqtk 2>&1 | grep Version",
-        "Pilon"  : "pilon | grep version",
+        "polca"  : "masurca -v",
+        "BUSCO"  : "busco -v"
     }
     logger = logging.getLogger(__name__)
     for program_name, cmd in version.items():
@@ -136,7 +167,18 @@ def main():
     parser.add_argument("-2", "--short_2", required=True, help="file with reverse paired-end reads")
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
-    parser.add_argument("--tax_db", default='', required=False, help="Path of kraken2/bracken database")
+    parser.add_argument(
+        "--kraken2_db",
+        default='',
+        required=False,
+        help="Path of kraken2/bracken database. If not provide, won't run kraken2"
+    )
+    parser.add_argument(
+        "--busco_db",
+        default='',
+        required=False,
+        help="Path of busco database. If not provide, won't run busco"
+    )
     parser.add_argument(
         "--no-quality-check", action="store_true", help="Disable quality check [default: OFF]"
     )
@@ -157,55 +199,56 @@ def main():
     
     check_dependency()
     
-    logger.info(f"""Illumina sequences
-        {args.short_1}
-        {args.short_2}""")
+    logger.info(f"Read 1: {args.short_1}")
+    logger.info(f"Read 2: {args.short_2}")
 
-    assembly_dirname = os.path.join(outdir, 'spades')
-    # kmerfinder_filename = os.path.join(outdir, 'kmerfinder.txt')
+    spades_dirname = os.path.join(outdir, 'spades')
     kraken2_filename = os.path.join(outdir, 'kraken2.txt')
     bracken_filename = os.path.join(outdir, 'bracken.txt')
+    assembly_filename = os.path.join(outdir, 'assembly.fasta')
 
     if args.no_quality_check is False:
         logger.info("Quality control checks")
         subprocess.run(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
 
-    if args.tax_db:
-        # logger.info("Identify species")
-        # species_identify(f'{args.short_1} {args.short_2}', args.tax_db, kmerfinder_filename)
+    if args.kraken2_db:
         logger.info("Classify")
-        taxonomic_classification(args.short_1, args.short_2, args.tax_db, kraken2_filename, bracken_filename, threads)
+        run_kraken2_and_bracken(args.short_1, args.short_2, args.kraken2_db, kraken2_filename, bracken_filename, threads)
 
     logger.info("Trim raw-reads.")
-    trim_r1, trim_r2 = trimming(args.short_1, args.short_2, args.outdir, threads)
+    trim_r1, trim_r2 = run_fastp(args.short_1, args.short_2, args.outdir, threads)
     total_bases = count_bases(trim_r1) + count_bases(trim_r2)
     gsize = estimate_genome_size(trim_r1, threads)
     logger.info(f"Estimated genome size was {gsize}bp.")
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
 
-    if args.no_assembly is False:
-        os.makedirs(assembly_dirname, exist_ok=True)
+    if not args.no_assembly:
+        os.makedirs(spades_dirname, exist_ok=True)
         depth = 100
         if origin_depth > depth:
             fraction = depth / origin_depth
             logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {depth}x")
-            sub_r1 = os.path.join(assembly_dirname, 'R1.sub.fastq')
+            sub_r1 = os.path.join(spades_dirname, 'R1.sub.fastq')
             subprocess.run(f"seqtk sample {trim_r1} {fraction} > {sub_r1}", shell=True)
-            sub_r2 = os.path.join(assembly_dirname, 'R2.sub.fastq')
+            sub_r2 = os.path.join(spades_dirname, 'R2.sub.fastq')
             subprocess.run(f"seqtk sample {trim_r2} {fraction} > {sub_r2}", shell=True)
             paired_1, paired_2 = sub_r1, sub_r2
         else:
             paired_1, paired_2 = trim_r1, trim_r2
         logger.info("Assembly with SPAdes")
-        result_dirname = assembly_pipeline(paired_1, paired_2, assembly_dirname, threads)
-        remove_low_complexity_sequence(
-            os.path.join(result_dirname, 'pilon.fasta'),
-            os.path.join(outdir, 'assembly.fasta'),
+        polished_filename = assembly_pipeline(paired_1, paired_2, spades_dirname, threads, logfile)
+        remove_low_complexity_and_shorter_sequence(
+            polished_filename,
+            assembly_filename,
         )
-        shutil.rmtree(assembly_dirname)
-    os.remove(r1)
-    os.remove(r2)
+        shutil.rmtree(spades_dirname)
+        os.chdir(outdir)
+        if args.busco_db:
+            logger.info("Running busco")
+            run_busco(assembly_filename, outdir, args.busco_db, threads)
+    os.remove(trim_r1)
+    os.remove(trim_r2)
     logger.info("Done")
 
 

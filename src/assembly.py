@@ -2,55 +2,32 @@ import os
 import subprocess
 
 
-def run_spades(paired_1, paired_2, outdir, threads):
-    cmd = [
-        'spades.py',
-        '-1', paired_1,
-        '-2', paired_2,
-        '-o', outdir,
-        '--threads', str(threads),
-        '--tmp-dir', '/tmp',
-        '--cov-cutoff', 'auto',
-        '--only-assembler',
-        '--disable-gzip-output',
-        '--isolate'
-    ]
-    subprocess.run(cmd)
-
-
 def reads_alignment(paired_1, paired_2, assembly, outfile, threads):
-    subprocess.run(['bwa-mem2', 'index', assembly])
+    subprocess.run(f'bwa-mem2 index {assembly}', shell=True, check=True)
     subprocess.run(
         f'bwa-mem2 mem -v 3 -x intractg -t {threads} {assembly} {paired_1} {paired_2} | '
         f'samtools sort --threads {threads} -m 500m --reference {assembly} -T /tmp -o {outfile}',
-        shell=True,
+        shell=True, check=True
     )
-    subprocess.run(['samtools', 'index', outfile])
+    subprocess.run(f'samtools index {outfile}', shell=True, check=True)
 
 
-def run_pilon(assembly, alignments, outdir, threads):
-    cmd = [
-        'pilon',
-        '--genome', assembly,
-        '--frags', alignments,
-        '--minmq', '60',
-        '--minqual', '3',
-        '--fix', 'bases',
-        '--output', 'pilon',
-        '--outdir', outdir,
-        '--threads', str(threads),
-        '--mindepth', '0.25',
-        '--changes',
-    ]
-    subprocess.run(cmd)
+def run_polca(assembly, paired_1, paired_2, output_dir, num_threads, logfile):
+    assembly = os.path.abspath(assembly)
+    os.chdir(output_dir)
+    cmd = f"polca.sh -a {assembly} -r '{paired_1} {paired_2}' -t {num_threads} 2>&1 >> {logfile}"
+    subprocess.run(cmd, shell=True, check=True)
 
 
-def assembly_pipeline(paired_1, paired_2, outdir, threads):
-    pilon_dirname = os.path.join(outdir, 'pilon')
-    asm_filename = os.path.join(outdir, 'contigs.fasta')
-    bam_filename = os.path.join(pilon_dirname, 'alignments.sort.bam')
-    os.makedirs(pilon_dirname, exist_ok=True)
-    run_spades(paired_1, paired_2, outdir, threads)
-    reads_alignment(paired_1, paired_2, asm_filename, bam_filename, threads)
-    run_pilon(asm_filename, bam_filename, pilon_dirname, threads)
-    return pilon_dirname
+def assembly_pipeline(paired_1, paired_2, outdir, threads, logfile):
+    polca_dirname = os.path.join(outdir, 'polca')
+    spades_assembly = os.path.join(outdir, 'contigs.fasta')
+    polca_assembly = os.path.join(polca_dirname, 'contigs.fasta.PolcaCorrected.fa')
+    os.makedirs(polca_dirname)
+    subprocess.run(
+        f"spades.py -1 {paired_1} -2 {paired_2} -o {outdir} -t {threads} --tmp-dir /tmp --cov-cutoff auto "
+        f"--only-assembler --disable-gzip-output --isolate",
+        shell=True, check=True,
+    )
+    run_polca(spades_assembly, paired_1, paired_2, polca_dirname, threads, logfile)
+    return polca_assembly
