@@ -210,13 +210,12 @@ def main():
         logger.info("Quality control checks")
         subprocess.run(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
 
+    logger.info("Trim raw-reads.")
+    trim_r1, trim_r2 = run_fastp(args.short_1, args.short_2, args.outdir, threads)
     if args.kraken2_db:
         logger.info("Running Kraken2/Bracken")
         logger.info(f"Kraken2/Bracken database is {args.kraken2_db}")
-        run_kraken2_and_bracken(args.short_1, args.short_2, args.kraken2_db, kraken2_filename, bracken_filename, threads)
-
-    logger.info("Trim raw-reads.")
-    trim_r1, trim_r2 = run_fastp(args.short_1, args.short_2, args.outdir, threads)
+        run_kraken2_and_bracken(trim_r1, trim_r2, args.kraken2_db, kraken2_filename, bracken_filename, threads)
     total_bases = count_bases(trim_r1) + count_bases(trim_r2)
     gsize = estimate_genome_size(trim_r1, threads)
     logger.info(f"Estimated genome size was {gsize}bp.")
