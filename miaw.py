@@ -14,7 +14,6 @@ from Bio.SeqUtils.lcc import lcc_simp
 from src.assembly import assembly_pipeline
 
 
-
 class LoggerFactory:
 
     FMT = "%(asctime)-20s[%(levelname)s] %(message)s"
@@ -152,12 +151,12 @@ def check_dependency():
     }
     logger = logging.getLogger(__name__)
     for program_name, cmd in version.items():
-        child_process = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
+        child_process = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, universal_newlines=True)
         if child_process.returncode:
             logger.error(msg=f"Could not determine version of {program_name}")
             sys.exit("Abort")
         else:
-            version = child_process.stdout.decode().strip()
+            version = child_process.stdout.strip()
             logger.info(msg=f"Using {program_name:8} | {version}")
 
 
@@ -212,7 +211,8 @@ def main():
         subprocess.run(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
 
     if args.kraken2_db:
-        logger.info("Classify")
+        logger.info("Running Kraken2/Bracken")
+        logger.info(f"Kraken2/Bracken database is {args.kraken2_db}")
         run_kraken2_and_bracken(args.short_1, args.short_2, args.kraken2_db, kraken2_filename, bracken_filename, threads)
 
     logger.info("Trim raw-reads.")

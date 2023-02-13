@@ -1,0 +1,16 @@
+name: miaw
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - biopython
+  - spades==3.15.3
+  - kraken2
+  - masurca
+  - fastp
+  - fastqc
+  - busco
+  - seqtk
+  - kmc
+  - samtools<=1.2
