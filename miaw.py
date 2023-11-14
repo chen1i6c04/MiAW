@@ -56,9 +56,8 @@ def syscall(cmd, stdout=False, stderr=False):
     else:
         stderr_str = None
     shell = True if isinstance(cmd, str) else False
-    executable = "/bin/bash" if shell else None
     child_process = subprocess.run(
-        cmd, shell=shell, stdout=stdout_str, stderr=stderr_str, universal_newlines=True, executable=executable,
+        cmd, shell=shell, stdout=stdout_str, stderr=stderr_str, universal_newlines=True, executable="/bin/bash",
     )
     if child_process.returncode:
         logger.error(f"Command {cmd} is fail")
