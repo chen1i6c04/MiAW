@@ -60,7 +60,7 @@ def syscall(cmd, stdout=False, stderr=False):
         cmd, shell=shell, stdout=stdout_str, stderr=stderr_str, universal_newlines=True, executable="/bin/bash",
     )
     if child_process.returncode:
-        logger.error(f"Command {cmd} is fail")
+        logger.error(f"Command {cmd} failed")
         sys.exit('Abort')
     return child_process
 
