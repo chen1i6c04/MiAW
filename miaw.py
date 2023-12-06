@@ -57,10 +57,10 @@ def syscall(cmd, stdout=False, stderr=False):
         stderr_str = None
     shell = True if isinstance(cmd, str) else False
     child_process = subprocess.run(
-        cmd, shell=shell, stdout=stdout_str, stderr=stderr_str, universal_newlines=True, executable="/bin/bash",
+        cmd, shell=shell, stdout=stdout_str, stderr=stderr_str, universal_newlines=True,
     )
     if child_process.returncode:
-        logger.error(f"Command {cmd} failed")
+        logger.error(f"Command '{cmd}' failed")
         sys.exit('Abort')
     return child_process
 
@@ -70,9 +70,9 @@ def run_fastp(input_1, input_2, outdir, threads):
     output_2 = os.path.join(outdir, 'R2.trim.fastq.gz')
     json_report = os.path.join(outdir, 'fastp.json')
     html_report = os.path.join(outdir, 'fastp.html')
-    cmd = ['fastp', '-i', input_1, '-I', input_2, '-o', output_1, '-O', output_2, '--length_required', '36',
-           '--cut_front', '3', '--cut_tail', '3', '--thread', str(threads), '--detect_adapter_for_pe',
-           '-j', json_report, '-h', html_report, '-t', '1',]
+    cmd = ['fastp', '-i', input_1, '-I', input_2, '-o', output_1, '-O', output_2, '--length_required', '50',
+           '--thread', str(threads), '--detect_adapter_for_pe', '-t', '1', '-z', '6', '-5', '-3',
+           '-j', json_report, '-h', html_report]
     logger.info(f"fastp command: {' '.join(cmd)}")
     syscall(cmd)
     return output_1, output_2
@@ -96,7 +96,7 @@ def remove_low_complexity_and_shorter_sequence(source, destination):
 
 
 def remove_target_sequence(input_1, input_2, output_1, output_2, target, threads):
-    cmd = f"bwa mem -t {threads} {target} {input_1} {input_2} | " \
+    cmd = f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | " \
           f"samtools sort -@ {threads} -n -O BAM - | " \
           f"samtools view -@ {threads} -f 12 -O BAM - | " \
           f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 /dev/null -s /dev/null -n -"
@@ -109,8 +109,8 @@ def run_kraken2_and_bracken(r1, r2, database, outdir, threads):
     with TemporaryDirectory(dir=outdir) as tmpdir:
         query_1 = os.path.join(tmpdir, 'R1.fq.gz')
         query_2 = os.path.join(tmpdir, 'R2.fq.gz')
-        ncbi_plasmid = os.path.join(DATABASE, 'ncbi_plasmids')
-        remove_target_sequence(r1, r2, query_1, query_2, ncbi_plasmid, threads)
+        index = os.path.join(DATABASE, 'ncbi_plasmids')
+        remove_target_sequence(r1, r2, query_1, query_2, index, threads)
         kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} " \
                       f"--report {kraken2_report} --memory-mapping --paired {query_1} {query_2}"
         bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -o {bracken_report} -l G"
@@ -151,7 +151,8 @@ def check_dependency():
         "SPAdes": "spades.py -v",
         "KMC": "kmc | grep K-Mer",
         "seqtk": "seqtk 2>&1 | grep Version",
-        "BUSCO": "busco -v"
+        "BUSCO": "busco -v",
+        "bwa-mem2": "bwa-mem2 version"
     }
     for program_name, cmd in version.items():
         child_process = syscall(cmd, stdout=True)
@@ -207,18 +208,15 @@ def main():
     logger.info(f"Read 1: {args.short_1}")
     logger.info(f"Read 2: {args.short_2}")
 
-    spades_dirname = os.path.join(outdir, 'spades')
-    assembly_filename = os.path.join(outdir, 'assembly.fasta')
+    spades_output = os.path.join(outdir, 'spades')
+    final_assembly = os.path.join(outdir, 'assembly.fasta')
 
     if args.no_quality_check is False:
         logger.info("Quality control checks")
-        syscall(['fastqc', '-o', outdir, '-t', '2', args.short_1, args.short_2])
+        syscall(f'fastqc -o {outdir} -t 2 {args.short_1} {args.short_2}')
 
     logger.info("Trim raw-reads.")
     trim_1, trim_2 = run_fastp(args.short_1, args.short_2, args.outdir, threads)
-    # clean_1, clean_2 = os.path.join(args.outdir, 'R1.clean.fastq.gz'), os.path.join(args.outdir, 'R2.clean.fastq.gz')
-    # human_t2t_hla = os.path.join(DATABASE, 'human-t2t-hla')
-    # remove_target_sequence(trim_1, trim_2, clean_1, clean_2, human_t2t_hla, threads)
     if args.kraken2_db:
         logger.info("Running Kraken2/Bracken")
         logger.info(f"Kraken2/Bracken database is {args.kraken2_db}")
@@ -235,31 +233,31 @@ def main():
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
 
     if not args.no_assembly:
-        os.makedirs(spades_dirname, exist_ok=True)
+        os.makedirs(spades_output, exist_ok=True)
         if args.depth:
             if origin_depth > args.depth:
                 fraction = args.depth / origin_depth
                 logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {args.depth}x")
-                sub_r1 = os.path.join(spades_dirname, 'R1.sub.fastq')
-                syscall(f"seqtk sample {trim_1} {fraction} > {sub_r1}")
-                sub_r2 = os.path.join(spades_dirname, 'R2.sub.fastq')
-                syscall(f"seqtk sample {trim_2} {fraction} > {sub_r2}")
-                paired_1, paired_2 = sub_r1, sub_r2
+                sub_1 = os.path.join(spades_output, 'R1.sub.fastq')
+                syscall(f"seqtk sample {trim_1} {fraction} > {sub_1}")
+                sub_2 = os.path.join(spades_output, 'R2.sub.fastq')
+                syscall(f"seqtk sample {trim_2} {fraction} > {sub_2}")
+                paired_1, paired_2 = sub_1, sub_2
             else:
                 logger.info("No read depth reduction requested or necessary.")
                 paired_1, paired_2 = trim_1, trim_2
         else:
             paired_1, paired_2 = trim_1, trim_2
         logger.info("Assembly with SPAdes")
-        spades_filename = run_spades(paired_1, paired_2, spades_dirname, threads)
+        spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
         remove_low_complexity_and_shorter_sequence(
-            spades_filename,
-            assembly_filename,
+            spades_assembly,
+            final_assembly,
         )
-        shutil.rmtree(spades_dirname)
+        shutil.rmtree(spades_output)
         if args.busco_db:
             logger.info("Running busco")
-            run_busco(assembly_filename, outdir, args.busco_db, threads)
+            run_busco(final_assembly, outdir, args.busco_db, threads)
     os.remove(trim_1)
     os.remove(trim_2)
     logger.info("Done")
