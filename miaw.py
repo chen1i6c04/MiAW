@@ -6,13 +6,13 @@ import re
 import sys
 import json
 import shutil
-import logging
 import argparse
 import subprocess
 from tempfile import TemporaryDirectory
 from loguru import logger
 from Bio import SeqIO
 from Bio.SeqUtils.lcc import lcc_simp
+from src.database import check_database_installation
 
 
 LOCATION = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +33,7 @@ def parse_genome_size(pattern):
     unit_map = {'K': 1e3, 'M': 1e6, 'G': 1e9}
     result = re.fullmatch(r'^([\d.]+)([KMG])', pattern)
     if result is None:
-        sys.exit(f"Couldn't parse {pattern}")
+        logger.error(f"Couldn't parse {pattern}")
     else:
         value, unit = result.groups()
         return int(float(value) * unit_map[unit])
@@ -41,7 +41,7 @@ def parse_genome_size(pattern):
 
 def count_bases(filename):
     output = subprocess.getoutput(
-        f"seqtk fqchk {filename} | grep ALL | awk '{{print $2}}'",
+        f"seqtk fqchk {filename} | grep ALL | cut -f 2",
     )
     return int(output.strip())
 
@@ -70,23 +70,23 @@ def run_fastp(input_1, input_2, outdir, threads):
     output_2 = os.path.join(outdir, 'R2.trim.fastq.gz')
     json_report = os.path.join(outdir, 'fastp.json')
     html_report = os.path.join(outdir, 'fastp.html')
-    cmd = ['fastp', '-i', input_1, '-I', input_2, '-o', output_1, '-O', output_2, '--length_required', '50',
-           '--thread', str(threads), '--detect_adapter_for_pe', '-t', '1', '-z', '6', '-5', '-3',
-           '-j', json_report, '-h', html_report]
-    logger.info(f"fastp command: {' '.join(cmd)}")
+    cmd = (f"fastp -i {input_1} -I {input_2} -o {output_1} -O {output_2} -l 50 -w {threads} "
+           f"--detect_adapter_for_pe -t 1 -z 6 -5 -3 -j {json_report} -h {html_report}")
+    logger.info(f"Running: {cmd}")
     syscall(cmd)
     return output_1, output_2
 
 
 def run_spades(paired_1, paired_2, outdir, threads):
     assembly = os.path.join(outdir, 'contigs.fasta')
-    cmd = ['spades.py', '-1', paired_1, '-2', paired_2, '-o', outdir, '-t', str(threads), '--tmp-dir', '/tmp',
-           '--cov-cutoff', 'auto', '--only-assembler', '--disable-gzip-output', '--isolate']
+    cmd = (f"spades.py -1 {paired_1} -2 {paired_2} -o {outdir} -t {threads} --tmp-dir /tmp --cov-cutoff auto "
+           f"--only-assembler --disable-gzip-output --isolate")
+    logger.info(f"Running: {cmd}")
     syscall(cmd)
     return assembly
 
 
-def remove_low_complexity_and_shorter_sequence(source, destination):
+def remove_homopolymer_and_shorter_sequence(source, destination):
     with open(destination, 'w') as handle:
         for record in SeqIO.parse(source, 'fasta'):
             if lcc_simp(record.seq) > 0 and len(record.seq) >= 200:
@@ -103,19 +103,21 @@ def remove_target_sequence(input_1, input_2, output_1, output_2, target, threads
     syscall(cmd)
 
 
-def run_kraken2_and_bracken(r1, r2, database, outdir, threads):
+def run_kraken2_and_bracken(short_one, short_two, database, outdir, threads):
     kraken2_report = os.path.join(outdir, 'kraken2.txt')
     bracken_report = os.path.join(outdir, 'bracken.txt')
     with TemporaryDirectory(dir=outdir) as tmpdir:
-        query_1 = os.path.join(tmpdir, 'R1.fq.gz')
-        query_2 = os.path.join(tmpdir, 'R2.fq.gz')
+        cleaned_one = os.path.join(tmpdir, 'R1.fq.gz')
+        cleaned_two = os.path.join(tmpdir, 'R2.fq.gz')
         index = os.path.join(DATABASE, 'ncbi_plasmids')
-        remove_target_sequence(r1, r2, query_1, query_2, index, threads)
+        remove_target_sequence(short_one, short_two, cleaned_one, cleaned_two, index, threads)
         kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} " \
-                      f"--report {kraken2_report} --memory-mapping --paired {query_1} {query_2}"
+                      f"--report {kraken2_report} --memory-mapping --paired {cleaned_one} {cleaned_two}"
+        logger.info(f"Running: {kraken2_cmd}")
+        syscall(kraken2_cmd)
         bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -o {bracken_report} -l G"
-        cmd = kraken2_cmd + " && " + bracken_cmd
-        syscall(cmd)
+        logger.info(f"Running: {bracken_cmd}")
+        syscall(bracken_cmd)
 
 
 def run_busco(input_file, output_dir, database, num_threads=1):
@@ -124,7 +126,7 @@ def run_busco(input_file, output_dir, database, num_threads=1):
     with TemporaryDirectory() as tmpdir:
         cmd = f"busco -o busco --out_path {tmpdir} -m geno --offline --download_path {database} " \
               f"-i {input_file} -c {num_threads} --auto-lineage-prok"
-        logger.info(f"busco command: {cmd}")
+        logger.info(f"Running: {cmd}")
         syscall(cmd)
         out_path = os.path.join(tmpdir, "busco")
         for f in os.listdir(out_path):
@@ -202,8 +204,12 @@ def main():
     fmt = "{time:YYYY-MM-DD HH:mm:ss} [{level}] {message}"
     logger.add(logfile, format=fmt, level='INFO')
     logger.add(sys.stderr, format=fmt, level='ERROR')
-    
+    logger.add(lambda _: sys.exit(1), level="ERROR")
+
+    logger.info("Checking dependencies")
     check_dependency()
+    logger.info("Checking database installation.")
+    check_database_installation(DATABASE)
     
     logger.info(f"Read 1: {args.short_1}")
     logger.info(f"Read 2: {args.short_2}")
@@ -250,7 +256,7 @@ def main():
             paired_1, paired_2 = trim_1, trim_2
         logger.info("Assembly with SPAdes")
         spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
-        remove_low_complexity_and_shorter_sequence(
+        remove_homopolymer_and_shorter_sequence(
             spades_assembly,
             final_assembly,
         )
