@@ -17,8 +17,8 @@ dependencies:
   - fastqc
   - seqtk
   - kmc==3.2.1
-  - minimap2==2.23
   - samtools==1.17
   - dendropy==4.5.2 # for busco
   - bwa-mem2==2.2.1
   - requests
+  - skani==0.1.4

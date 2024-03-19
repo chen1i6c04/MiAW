@@ -29,11 +29,11 @@ def estimate_genome_size(filename, threads):
     return int(output.strip().split()[-1])
 
 
-def parse_genome_size(pattern):
-    unit_map = {'K': 1e3, 'M': 1e6, 'G': 1e9}
-    result = re.fullmatch(r'^([\d.]+)([KMG])', pattern)
+def parse_genome_size(string):
+    unit_map = {'K': 1e3, 'M': 1e6, 'G': 1e9, 'k': 1e3, 'm': 1e6, 'g': 1e9}
+    result = re.fullmatch(r'^([\d.]+)([KMGkmg])', string)
     if result is None:
-        logger.error(f"Couldn't parse {pattern}")
+        logger.error(f"Couldn't parse {string}")
     else:
         value, unit = result.groups()
         return int(float(value) * unit_map[unit])
@@ -70,7 +70,7 @@ def run_fastp(input_1, input_2, outdir, threads):
     output_2 = os.path.join(outdir, 'R2.trim.fastq.gz')
     json_report = os.path.join(outdir, 'fastp.json')
     html_report = os.path.join(outdir, 'fastp.html')
-    cmd = (f"fastp -i {input_1} -I {input_2} -o {output_1} -O {output_2} -l 50 -w {threads} "
+    cmd = (f"fastp -i {input_1} -I {input_2} -o {output_1} -O {output_2} -l 50 -w {16 if threads > 16 else threads} "
            f"--detect_adapter_for_pe -t 1 -z 6 -5 -3 -j {json_report} -h {html_report}")
     logger.info(f"Running: {cmd}")
     syscall(cmd)
@@ -96,10 +96,10 @@ def remove_homopolymer_and_shorter_sequence(source, destination):
 
 
 def remove_target_sequence(input_1, input_2, output_1, output_2, target, threads):
-    cmd = f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | " \
-          f"samtools sort -@ {threads} -n -O BAM - | " \
-          f"samtools view -@ {threads} -f 12 -O BAM - | " \
-          f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 /dev/null -s /dev/null -n -"
+    cmd = (f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | "
+           f"samtools sort -@ {threads} -n -O BAM - | "
+           f"samtools view -@ {threads} -f 12 -O BAM - | "
+           f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 /dev/null -s /dev/null -n -")
     syscall(cmd)
 
 
@@ -144,6 +144,11 @@ def run_busco(input_file, output_dir, database, num_threads=1):
                 )
 
 
+def run_skani(input_file, output_dir, database, num_threads=1):
+    cmd = f"skani search -q {input_file} -d {database} -o {output_dir} -n 1 -t {num_threads}"
+    syscall(cmd)
+
+
 def check_dependency():
     version = {
         "FastQC": "fastqc -v",
@@ -154,7 +159,8 @@ def check_dependency():
         "KMC": "kmc | grep K-Mer",
         "seqtk": "seqtk 2>&1 | grep Version",
         "BUSCO": "busco -v",
-        "bwa-mem2": "bwa-mem2 version"
+        "bwa-mem2": "bwa-mem2 version",
+        "skANI": "skani -V"
     }
     for program_name, cmd in version.items():
         child_process = syscall(cmd, stdout=True)
@@ -173,26 +179,29 @@ def main():
     parser.add_argument("-o", "--outdir", required=True, help="directory to store all the resulting files")
     parser.add_argument("-t", "--threads", default=8, type=int, required=False, help="number of threads [Default 8]")
     parser.add_argument('-g', '--genome-size', default=None, 
-                        help='Estimated genome size eg. 3.2M <blank=AUTO> (default: "")')
-    parser.add_argument('-x', '--depth', default=50, type=int,
+                        help='Estimated genome size eg. 3.2M or 5m <blank=AUTO> (default: "")')
+    parser.add_argument('-x', '--depth', default=100, type=int,
                         help='Sub-sample reads to this depth. Disable with --depth 0 (default: 50)')
     parser.add_argument(
         "--kraken2_db",
         default='',
         required=False,
-        help="Path of kraken2/bracken database. If not provide, won't run kraken2"
+        help="Path of kraken2/bracken database"
     )
     parser.add_argument(
         "--busco_db",
         default='',
         required=False,
-        help="Path of busco database. If not provide, won't run busco"
+        help="Path of busco database"
     )
     parser.add_argument(
-        "--no-quality-check", action="store_true", help="Disable quality check [default: OFF]"
+        "--skani_db",
+        default='',
+        required=False,
+        help="Path of skANI database"
     )
     parser.add_argument(
-        "--no-assembly", action="store_true", help="Disable denovo assembly [default: OFF]"
+        "--disable-fastqc", action="store_true", help="Disable FastQC [default: OFF]"
     )
 
     args = parser.parse_args()
@@ -217,15 +226,15 @@ def main():
     spades_output = os.path.join(outdir, 'spades')
     final_assembly = os.path.join(outdir, 'assembly.fasta')
 
-    if args.no_quality_check is False:
+    if args.disable_fastqc is False:
         logger.info("Quality control checks")
         syscall(f'fastqc -o {outdir} -t 2 {args.short_1} {args.short_2}')
 
     logger.info("Trim raw-reads.")
     trim_1, trim_2 = run_fastp(args.short_1, args.short_2, args.outdir, threads)
     if args.kraken2_db:
-        logger.info("Running Kraken2/Bracken")
-        logger.info(f"Kraken2/Bracken database is {args.kraken2_db}")
+        logger.info("Running Kraken2 & Bracken")
+        logger.info(f"Kraken2 database is {args.kraken2_db}")
         run_kraken2_and_bracken(trim_1, trim_2, args.kraken2_db, outdir, threads)
     total_bases = count_bases(trim_1) + count_bases(trim_2)
 
@@ -238,32 +247,38 @@ def main():
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")
 
-    if not args.no_assembly:
-        os.makedirs(spades_output, exist_ok=True)
-        if args.depth:
-            if origin_depth > args.depth:
-                fraction = args.depth / origin_depth
-                logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {args.depth}x")
-                sub_1 = os.path.join(spades_output, 'R1.sub.fastq')
-                syscall(f"seqtk sample {trim_1} {fraction} > {sub_1}")
-                sub_2 = os.path.join(spades_output, 'R2.sub.fastq')
-                syscall(f"seqtk sample {trim_2} {fraction} > {sub_2}")
-                paired_1, paired_2 = sub_1, sub_2
-            else:
-                logger.info("No read depth reduction requested or necessary.")
-                paired_1, paired_2 = trim_1, trim_2
+    os.makedirs(spades_output, exist_ok=True)
+    if args.depth:
+        if origin_depth > args.depth:
+            fraction = args.depth / origin_depth
+            logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {args.depth}x")
+            sub_1 = os.path.join(spades_output, 'R1.sub.fastq')
+            syscall(f"seqtk sample {trim_1} {fraction} > {sub_1}")
+            sub_2 = os.path.join(spades_output, 'R2.sub.fastq')
+            syscall(f"seqtk sample {trim_2} {fraction} > {sub_2}")
+            paired_1, paired_2 = sub_1, sub_2
         else:
+            logger.info("No read depth reduction requested or necessary.")
             paired_1, paired_2 = trim_1, trim_2
-        logger.info("Assembly with SPAdes")
-        spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
-        remove_homopolymer_and_shorter_sequence(
-            spades_assembly,
-            final_assembly,
-        )
-        shutil.rmtree(spades_output)
-        if args.busco_db:
-            logger.info("Running busco")
-            run_busco(final_assembly, outdir, args.busco_db, threads)
+    else:
+        paired_1, paired_2 = trim_1, trim_2
+    logger.info("Running SPAdes")
+    spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
+    shutil.copyfile(spades_assembly, os.path.join(outdir, 'spades.fasta'))
+    remove_homopolymer_and_shorter_sequence(
+        spades_assembly,
+        final_assembly,
+    )
+    shutil.rmtree(spades_output)
+
+    if args.busco_db:
+        logger.info("Running busco")
+        run_busco(final_assembly, outdir, args.busco_db, threads)
+
+    if args.skani_db:
+        logger.info("Running skANI")
+        run_skani(final_assembly, os.path.join(outdir, 'skani.txt'), args.skani_db, threads)
+
     os.remove(trim_1)
     os.remove(trim_2)
     logger.info("Done")
