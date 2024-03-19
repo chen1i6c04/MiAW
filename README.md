@@ -6,7 +6,7 @@ MiSeq Analysis Workflow of CDC central lab
 conda env create -f requirement.yaml
 ```
 ## Pipeline
-<img src="misc/pipeline.png" width="800">
+<img src="misc/pipeline.png" width="600">
 
 ## Usage
 
