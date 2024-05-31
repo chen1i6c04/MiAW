@@ -22,3 +22,4 @@ dependencies:
   - bwa-mem2==2.2.1
   - requests
   - skani==0.1.4
+  - rasusa==2.0.0

@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import json
+import gzip
 import shutil
 import argparse
 import subprocess
@@ -14,9 +15,7 @@ from Bio import SeqIO
 from Bio.SeqUtils.lcc import lcc_simp
 from src.database import check_database_installation
 
-
-LOCATION = os.path.dirname(os.path.abspath(__file__))
-DATABASE = os.path.join(LOCATION, 'database')
+current_location = os.path.dirname(os.path.abspath(__file__))
 
 
 def estimate_genome_size(filename, threads):
@@ -83,22 +82,32 @@ def run_spades(paired_1, paired_2, outdir, threads):
            f"--only-assembler --disable-gzip-output --isolate")
     logger.info(f"Running: {cmd}")
     syscall(cmd)
+    if not os.path.exists(assembly):
+        logger.error("Assembly fail!")
     return assembly
 
 
-def remove_homopolymer_and_shorter_sequence(source, destination):
-    with open(destination, 'w') as handle:
-        for record in SeqIO.parse(source, 'fasta'):
-            if lcc_simp(record.seq) > 0 and len(record.seq) >= 200:
-                SeqIO.write(record, handle, 'fasta')
+def rename_and_filter_contigs(src, dst):
+    with open(dst, 'w') as handle:
+        for record in SeqIO.parse(src, 'fasta'):
+            node, length, coverage = re.search('NODE_(\d+)_length_(\d+)_cov_(\d*\.*\d+)', record.id).groups()
+            node, length, coverage = int(node), int(length), float(coverage)
+            if length < 200:
+                logger.info(f"Removing short contig (< 200 bp) : {record.id}")
+            elif coverage < 2:
+                logger.info(f"Removing low coverage contig (< 2 x) : {record.id}")
+            elif lcc_simp(record.seq) == 0:
+                logger.info(f"Removing homopolymer contig : {record.id}")
             else:
-                logger.info(f"Removing contig {record.id}")
+                origname = record.id
+                record.id = f"contig{node:04}"
+                record.description = f"length={length} cov={coverage:.2f} origname={origname}"
+                SeqIO.write(record, handle, 'fasta')
 
 
-def remove_target_sequence(input_1, input_2, output_1, output_2, target, threads):
+def extract_unmapped_sequences(input_1, input_2, output_1, output_2, target, threads):
     cmd = (f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | "
-           f"samtools sort -@ {threads} -n -O BAM - | "
-           f"samtools view -@ {threads} -f 12 -O BAM - | "
+           f"samtools view -@ {threads} -b -h -f 12 - | "
            f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 /dev/null -s /dev/null -n -")
     syscall(cmd)
 
@@ -106,18 +115,19 @@ def remove_target_sequence(input_1, input_2, output_1, output_2, target, threads
 def run_kraken2_and_bracken(short_one, short_two, database, outdir, threads):
     kraken2_report = os.path.join(outdir, 'kraken2.txt')
     bracken_report = os.path.join(outdir, 'bracken.txt')
+    target = os.path.join(current_location, 'database', 'ncbi_plasmids')
+
     with TemporaryDirectory(dir=outdir) as tmpdir:
-        cleaned_one = os.path.join(tmpdir, 'R1.fq.gz')
-        cleaned_two = os.path.join(tmpdir, 'R2.fq.gz')
-        index = os.path.join(DATABASE, 'ncbi_plasmids')
-        remove_target_sequence(short_one, short_two, cleaned_one, cleaned_two, index, threads)
-        kraken2_cmd = f"kraken2 --db {database} --output /dev/null --threads {threads} " \
-                      f"--report {kraken2_report} --memory-mapping --paired {cleaned_one} {cleaned_two}"
+        unmapped_one = os.path.join(tmpdir, 'unmapped_1.fastq.gz')
+        unmapped_two = os.path.join(tmpdir, 'unmapped_2.fastq.gz')
+        extract_unmapped_sequences(short_one, short_two, unmapped_one, unmapped_two, target, threads)
+        kraken2_cmd = (f"kraken2 --db {database} --output /dev/null --threads {threads} --confidence 0.6 "
+                       f"--report {kraken2_report} --memory-mapping --paired {unmapped_one} {unmapped_two}")
         logger.info(f"Running: {kraken2_cmd}")
         syscall(kraken2_cmd)
-        bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -o {bracken_report} -l G"
-        logger.info(f"Running: {bracken_cmd}")
-        syscall(bracken_cmd)
+    bracken_cmd = f"bracken -i {kraken2_report} -d {database} -w /dev/null -o {bracken_report} -l G"
+    logger.info(f"Running: {bracken_cmd}")
+    syscall(bracken_cmd)
 
 
 def run_busco(input_file, output_dir, database, num_threads=1):
@@ -160,7 +170,8 @@ def check_dependency():
         "seqtk": "seqtk 2>&1 | grep Version",
         "BUSCO": "busco -v",
         "bwa-mem2": "bwa-mem2 version",
-        "skANI": "skani -V"
+        "skANI": "skani -V",
+        "rasusa": "rasusa -V"
     }
     for program_name, cmd in version.items():
         child_process = syscall(cmd, stdout=True)
@@ -217,8 +228,7 @@ def main():
 
     logger.info("Checking dependencies")
     check_dependency()
-    logger.info("Checking database installation.")
-    check_database_installation(DATABASE)
+    check_database_installation(os.path.join(current_location, 'database'))
     
     logger.info(f"Read 1: {args.short_1}")
     logger.info(f"Read 2: {args.short_2}")
@@ -252,10 +262,9 @@ def main():
         if origin_depth > args.depth:
             fraction = args.depth / origin_depth
             logger.info(f"Subsampling reads by factor {fraction:.3f} to get from {origin_depth}x to {args.depth}x")
-            sub_1 = os.path.join(spades_output, 'R1.sub.fastq')
-            syscall(f"seqtk sample {trim_1} {fraction} > {sub_1}")
-            sub_2 = os.path.join(spades_output, 'R2.sub.fastq')
-            syscall(f"seqtk sample {trim_2} {fraction} > {sub_2}")
+            sub_1 = os.path.join(spades_output, 'R1.sub.fastq.gz')
+            sub_2 = os.path.join(spades_output, 'R2.sub.fastq.gz')
+            syscall(f"rasusa reads -f {fraction} -O g -o {sub_1} -o {sub_2} {trim_1} {trim_2}")
             paired_1, paired_2 = sub_1, sub_2
         else:
             logger.info("No read depth reduction requested or necessary.")
@@ -265,7 +274,7 @@ def main():
     logger.info("Running SPAdes")
     spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
     shutil.copyfile(spades_assembly, os.path.join(outdir, 'spades.fasta'))
-    remove_homopolymer_and_shorter_sequence(
+    rename_and_filter_contigs(
         spades_assembly,
         final_assembly,
     )
