@@ -170,6 +170,7 @@ def check_dependency():
         "seqtk": "seqtk 2>&1 | grep Version",
         "BUSCO": "busco -v",
         "bwa-mem2": "bwa-mem2 version",
+        "samtools": "samtools version | head -n 1",
         "skANI": "skani -V",
         "rasusa": "rasusa -V"
     }
