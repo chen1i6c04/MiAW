@@ -4,12 +4,11 @@ __email__ = 'chen1i6c04@gmail.com'
 import os
 import re
 import sys
-import json
 import gzip
 import shutil
 import argparse
 import subprocess
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from loguru import logger
 from Bio import SeqIO
 from Bio.SeqUtils.lcc import lcc_simp
@@ -20,12 +19,10 @@ current_location = os.path.dirname(os.path.abspath(__file__))
 
 def estimate_genome_size(filename, threads):
     with TemporaryDirectory() as tmpdir:
-        output = subprocess.getoutput(
-            f"kmc -sm -t{threads} -k21 -ci10 {filename} {tmpdir}/kmc {tmpdir} | "
-            f"grep 'No. of unique counted k-mers' | "
-            f"awk '{{print $NF}}'",
-        )
-    return int(output.strip().split()[-1])
+        cmd = (f"kmc -sm -t{threads} -k21 -ci10 {filename} {tmpdir}/kmc {tmpdir} | "
+               f"grep -oP 'No. of unique counted k-mers\s+:\s+\K\d+'")
+        child_process = syscall(cmd, stdout=True)
+    return int(child_process.stdout)
 
 
 def parse_genome_size(string):
@@ -43,6 +40,23 @@ def count_bases(filename):
         f"seqtk fqchk {filename} | grep ALL | cut -f 2",
     )
     return int(output.strip())
+
+
+def validate_fastq(file):
+    """Checks the input fastq is really a fastq
+    """
+    def is_gzip(f):
+        with open(f, 'rb') as f:
+            signature = f.read(2)
+        return signature == b'\x1f\x8b'
+    # to get extension
+    open_function = gzip.open if is_gzip(file) else open
+    with open_function(file, 'rt') as handle:
+        if any(SeqIO.parse(handle, 'fastq')):
+            logger.info(f"FASTQ {file} checked")
+        else:
+            logger.error(f"Input file {file} is not in the FASTQ format.")
+            sys.exit('Abort')
 
 
 def syscall(cmd, stdout=False, stderr=False):
@@ -78,8 +92,8 @@ def run_fastp(input_1, input_2, outdir, threads):
 
 def run_spades(paired_1, paired_2, outdir, threads):
     assembly = os.path.join(outdir, 'contigs.fasta')
-    cmd = (f"spades.py -1 {paired_1} -2 {paired_2} -o {outdir} -t {threads} --tmp-dir /tmp --cov-cutoff auto "
-           f"--only-assembler --disable-gzip-output --isolate")
+    cmd = (f"spades.py -1 {paired_1} -2 {paired_2} -o {outdir} -t {threads} --tmp-dir {gettempdir()} --cov-cutoff auto "
+           f"--only-assembler --isolate")
     logger.info(f"Running: {cmd}")
     syscall(cmd)
     if not os.path.exists(assembly):
@@ -108,7 +122,7 @@ def rename_and_filter_contigs(src, dst):
 def extract_unmapped_sequences(input_1, input_2, output_1, output_2, target, threads):
     cmd = (f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | "
            f"samtools view -@ {threads} -b -h -f 12 - | "
-           f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 /dev/null -s /dev/null -n -")
+           f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 {os.devnull} -s {os.devnull} -n -")
     syscall(cmd)
 
 
@@ -121,7 +135,7 @@ def run_kraken2_and_bracken(short_one, short_two, database, outdir, threads):
         unmapped_one = os.path.join(tmpdir, 'unmapped_1.fastq.gz')
         unmapped_two = os.path.join(tmpdir, 'unmapped_2.fastq.gz')
         extract_unmapped_sequences(short_one, short_two, unmapped_one, unmapped_two, target, threads)
-        kraken2_cmd = (f"kraken2 --db {database} --output /dev/null --threads {threads} --confidence 0.6 "
+        kraken2_cmd = (f"kraken2 --db {database} --output {os.devnull} --threads {threads} --confidence 0.6 "
                        f"--report {kraken2_report} --memory-mapping --paired {unmapped_one} {unmapped_two}")
         logger.info(f"Running: {kraken2_cmd}")
         syscall(kraken2_cmd)
@@ -155,7 +169,7 @@ def run_busco(input_file, output_dir, database, num_threads=1):
 
 
 def run_skani(input_file, output_dir, database, num_threads=1):
-    cmd = f"skani search -q {input_file} -d {database} -o {output_dir} -n 1 -t {num_threads}"
+    cmd = f"skani search -q {input_file} -d {database} -o {output_dir} -n 5 -t {num_threads}"
     syscall(cmd)
 
 
@@ -172,7 +186,8 @@ def check_dependency():
         "bwa-mem2": "bwa-mem2 version",
         "samtools": "samtools version | head -n 1",
         "skANI": "skani -V",
-        "rasusa": "rasusa -V"
+        "rasusa": "rasusa -V",
+        "pypolca": "pypolca -V"
     }
     for program_name, cmd in version.items():
         child_process = syscall(cmd, stdout=True)
@@ -231,8 +246,8 @@ def main():
     check_dependency()
     check_database_installation(os.path.join(current_location, 'database'))
     
-    logger.info(f"Read 1: {args.short_1}")
-    logger.info(f"Read 2: {args.short_2}")
+    validate_fastq(args.short_1)
+    validate_fastq(args.short_2)
 
     spades_output = os.path.join(outdir, 'spades')
     final_assembly = os.path.join(outdir, 'assembly.fasta')
@@ -275,8 +290,11 @@ def main():
     logger.info("Running SPAdes")
     spades_assembly = run_spades(paired_1, paired_2, spades_output, threads)
     shutil.copyfile(spades_assembly, os.path.join(outdir, 'spades.fasta'))
+    pypolca_output = os.path.join(outdir, 'pypolca')
+    logger.info("Running pypolca")
+    syscall(f"pypolca run -a {spades_assembly} -1 {paired_1} -2 {paired_2} -t {threads} -o {pypolca_output} --careful")
     rename_and_filter_contigs(
-        spades_assembly,
+        os.path.join(pypolca_output, 'pypolca_corrected.fasta'),
         final_assembly,
     )
     shutil.rmtree(spades_output)
@@ -296,3 +314,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
