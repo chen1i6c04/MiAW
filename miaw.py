@@ -1,6 +1,7 @@
 __author__ = 'B.H Chen'
 __email__ = 'chen1i6c04@gmail.com'
 
+import json
 import os
 import re
 import sys
@@ -33,13 +34,6 @@ def parse_genome_size(string):
     else:
         value, unit = result.groups()
         return int(float(value) * unit_map[unit])
-
-
-def count_bases(filename):
-    output = subprocess.getoutput(
-        f"seqtk fqchk {filename} | grep ALL | cut -f 2",
-    )
-    return int(output.strip())
 
 
 def validate_fastq(file):
@@ -119,8 +113,8 @@ def rename_and_filter_contigs(src, dst):
                 SeqIO.write(record, handle, 'fasta')
 
 
-def extract_unmapped_sequences(input_1, input_2, output_1, output_2, target, threads):
-    cmd = (f"bwa-mem2 mem -t {threads} {target} {input_1} {input_2} | "
+def extract_unmapped_sequences(input_1, input_2, output_1, output_2, index, threads):
+    cmd = (f"minimap2 -t {threads } -ax sr {index}  {input_1} {input_2} | "
            f"samtools view -@ {threads} -b -h -f 12 - | "
            f"samtools fastq -@ {threads} -c 6 -1 {output_1} -2 {output_2} -0 {os.devnull} -s {os.devnull} -n -")
     syscall(cmd)
@@ -129,12 +123,12 @@ def extract_unmapped_sequences(input_1, input_2, output_1, output_2, target, thr
 def run_kraken2_and_bracken(short_one, short_two, database, outdir, threads):
     kraken2_report = os.path.join(outdir, 'kraken2.txt')
     bracken_report = os.path.join(outdir, 'bracken.txt')
-    target = os.path.join(current_location, 'database', 'ncbi_plasmids')
+    index = os.path.join(current_location, 'database', 'ncbi_plasmids.mmi')
 
     with TemporaryDirectory(dir=outdir) as tmpdir:
         unmapped_one = os.path.join(tmpdir, 'unmapped_1.fastq.gz')
         unmapped_two = os.path.join(tmpdir, 'unmapped_2.fastq.gz')
-        extract_unmapped_sequences(short_one, short_two, unmapped_one, unmapped_two, target, threads)
+        extract_unmapped_sequences(short_one, short_two, unmapped_one, unmapped_two, index, threads)
         kraken2_cmd = (f"kraken2 --db {database} --output {os.devnull} --threads {threads} --confidence 0.6 "
                        f"--report {kraken2_report} --memory-mapping --paired {unmapped_one} {unmapped_two}")
         logger.info(f"Running: {kraken2_cmd}")
@@ -183,7 +177,7 @@ def check_dependency():
         "KMC": "kmc | grep K-Mer",
         "seqtk": "seqtk 2>&1 | grep Version",
         "BUSCO": "busco -v",
-        "bwa-mem2": "bwa-mem2 version",
+        "minimap2": "minimap2 --version",
         "samtools": "samtools version | head -n 1",
         "skANI": "skani -V",
         "rasusa": "rasusa -V",
@@ -262,13 +256,17 @@ def main():
         logger.info("Running Kraken2 & Bracken")
         logger.info(f"Kraken2 database is {args.kraken2_db}")
         run_kraken2_and_bracken(trim_1, trim_2, args.kraken2_db, outdir, threads)
-    total_bases = count_bases(trim_1) + count_bases(trim_2)
+    with open(os.path.join(outdir, 'fastp.json')) as handle:
+        fastp_report = json.load(handle)
+    total_bases = fastp_report['summary']['after_filtering']['total_reads']
 
     if args.genome_size:
         gsize = parse_genome_size(args.genome_size)
         logger.info(f"Using genome size was {gsize}bp.")
     else:
-        gsize = estimate_genome_size(trim_1, threads)
+        read1_q30_bases = fastp_report['read1_after_filtering']['q30_bases']
+        read2_q30_bases = fastp_report['read2_after_filtering']['q30_bases']
+        gsize = estimate_genome_size(trim_1 if read1_q30_bases >= read2_q30_bases else trim_2, threads)
         logger.info(f"Estimated genome size was {gsize}bp.")
     origin_depth = int(total_bases / gsize)
     logger.info(f"Estimated sequencing depth: {origin_depth}x.")

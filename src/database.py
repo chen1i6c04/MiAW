@@ -35,26 +35,18 @@ def check_database_installation(dbpath):
     checks database is installed correctly
     :param dbpath: database directory
     """
-    members = [
-        'ncbi_plasmids.0123',
-        'ncbi_plasmids.amb',
-        'ncbi_plasmids.ann',
-        'ncbi_plasmids.bwt.2bit.64',
-        'ncbi_plasmids.pac',
-    ]
-    for member in members:
-        f = os.path.join(dbpath, member)
-        if not os.path.exists(f):
-            logger.info(
-                f"Database directory is missing file {f}. Database will be downloaded."
-            )
-            get_database(dbpath)
-            break
+    member = 'ncbi_plasmids.mmi'
+    f = os.path.join(dbpath, member)
+    if not os.path.exists(f):
+        logger.info(
+            f"Database directory is missing file {f}. Database will be downloaded."
+        )
+        get_database(dbpath)
 
 
 def building_database(db):
     try:
-        subprocess.run(f"bwa-mem2 index {db}", shell=True, check=True)
+        subprocess.run(f"minimap2 -d {db + '.mmi'} {db}", shell=True, check=True)
         os.remove(db)
     except subprocess.CalledProcessError:
         logger.error("Could not building database.")
