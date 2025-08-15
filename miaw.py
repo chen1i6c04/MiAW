@@ -258,7 +258,7 @@ def main():
         run_kraken2_and_bracken(trim_1, trim_2, args.kraken2_db, outdir, threads)
     with open(os.path.join(outdir, 'fastp.json')) as handle:
         fastp_report = json.load(handle)
-    total_bases = fastp_report['summary']['after_filtering']['total_reads']
+    total_bases = fastp_report['summary']['after_filtering']['total_bases']
 
     if args.genome_size:
         gsize = parse_genome_size(args.genome_size)
